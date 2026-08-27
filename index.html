@@ -83,6 +83,7 @@
   .history button.active { outline: 2px solid var(--accent); }
   #installBtn { position: fixed; bottom: 16px; right: 16px; display: none; }
   #disconnectBtn { display: none; margin-left: 8px; }
+  #resetLineBtn { display: none; margin-left: 8px; }
   .rssiPanel { margin: 16px 0; }
   .rssiHeader { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
   .rssiHeader .sub { margin: 0; }
@@ -98,6 +99,7 @@
 
   <button id="connectBtn">Se connecter au relais (BLE)</button>
   <button id="disconnectBtn" class="secondary">Déconnecter</button>
+  <button id="resetLineBtn" class="secondary" title="Force une nouvelle calibration de la ligne virtuelle GPS (3 tours) sur la voiture">Réinitialiser la ligne</button>
   <div id="status">Non connecté.</div>
 
   <div class="rssiPanel">
@@ -125,6 +127,7 @@
       </div>
     </div>
     <div class="flags" id="flags"></div>
+    <div class="sub" id="gpsInfo" style="margin-bottom:12px;"></div>
 
     <table>
       <thead>
@@ -188,6 +191,7 @@ const LIMIT_FLAGS = [
 
 const SERVICE_UUID = "b3d5a900-1a2b-4c3d-9e0f-56789abcdef0";
 const CHARACTERISTIC_UUID = "b3d5a901-1a2b-4c3d-9e0f-56789abcdef0";
+const CMD_CHARACTERISTIC_UUID = "b3d5a902-1a2b-4c3d-9e0f-56789abcdef0";
 
 // ---------- Reassemblage des paquets fragmentes (BLE_CHUNK_SIZE cote relais) ----------
 let chunks = [];
@@ -299,7 +303,7 @@ function decodeLapPacket(bytes) {
   const view = new DataView(bytes.buffer);
   const lapNumber = view.getUint16(1, true);
   const lapDurationMs = view.getUint32(3, true);
-  const timingSource = view.getUint8(7); // 0 = radio approx, 1 = GPS precis (ligne virtuelle)
+  const timingSource = view.getUint8(7); // 0 = radio 1er beacon, 1 = GPS precis (ligne virtuelle), 2 = radio pic RSSI
 
   const values = [];
   let offset = 8;
@@ -309,9 +313,16 @@ function decodeLapPacket(bytes) {
     const avg = view.getInt16(offset, true); offset += 2;
     values.push({ min, max, avg });
   }
-  const limitFlags = view.getUint16(offset, true);
+  const limitFlags = view.getUint16(offset, true); offset += 2;
 
-  const lap = { num: lapNumber, durationMs: lapDurationMs, timingSource, values, limitFlags };
+  let originLat = null, originLon = null, maxDistM = null;
+  if (bytes.length >= offset + 10) {
+    originLat = view.getInt32(offset, true) / 1e7; offset += 4;
+    originLon = view.getInt32(offset, true) / 1e7; offset += 4;
+    maxDistM = view.getUint16(offset, true); offset += 2;
+  }
+
+  const lap = { num: lapNumber, durationMs: lapDurationMs, timingSource, values, limitFlags, originLat, originLon, maxDistM };
   laps.push(lap);
   renderLap(lap);
   renderHistory();
@@ -336,7 +347,9 @@ function renderLap(lap) {
   document.getElementById("lapNum").textContent = "#" + lap.num;
   document.getElementById("lapTime").textContent = fmtDuration(lap.durationMs);
   document.getElementById("timingSrc").textContent =
-    lap.timingSource === 1 ? "Durée (GPS précis)" : "Durée (radio approx.)";
+    lap.timingSource === 1 ? "Durée (GPS précis)" :
+    lap.timingSource === 2 ? "Durée (radio, pic signal)" :
+    "Durée (radio, 1er signal)";
 
   const prev = findPreviousLap(lap);
   const deltaEl = document.getElementById("lapDelta");
@@ -353,6 +366,19 @@ function renderLap(lap) {
   document.getElementById("flags").textContent = activeFlags.length
     ? "⚠ " + activeFlags.join(" · ")
     : "";
+
+  const gpsEl = document.getElementById("gpsInfo");
+  if (lap.maxDistM !== null && lap.maxDistM !== undefined) {
+    let txt = `📍 Jusqu'à ${lap.maxDistM} m de l'origine`;
+    if (lap.originLat) {
+      const mapUrl = `https://www.google.com/maps?q=${lap.originLat},${lap.originLon}`;
+      gpsEl.innerHTML = `${txt} — <a href="${mapUrl}" target="_blank" style="color:var(--accent)">origine sur la carte</a>`;
+    } else {
+      gpsEl.textContent = txt;
+    }
+  } else {
+    gpsEl.textContent = "";
+  }
 
   const tbody = document.getElementById("tbody");
   tbody.innerHTML = "";
@@ -396,10 +422,12 @@ function renderHistory() {
 let bleDevice = null;
 let userDisconnected = false;
 let reconnecting = false;
+let cmdCharacteristic = null;
 
 function setConnectedUI(connected) {
   document.getElementById("connectBtn").style.display = connected ? "none" : "inline-block";
   document.getElementById("disconnectBtn").style.display = connected ? "inline-block" : "none";
+  document.getElementById("resetLineBtn").style.display = connected ? "inline-block" : "none";
 }
 
 // Le relais coupe volontairement le BLE entre les tours (pour laisser l'ESP-NOW
@@ -413,6 +441,7 @@ async function attachToRelay(server) {
   const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
   await characteristic.startNotifications();
   characteristic.addEventListener("characteristicvaluechanged", onNotify);
+  cmdCharacteristic = await service.getCharacteristic(CMD_CHARACTERISTIC_UUID);
   statusEl.textContent = "Connecté à " + (bleDevice.name || "TRLG-Relais") + ". En attente d'un tour...";
   setConnectedUI(true);
 }
@@ -460,6 +489,24 @@ document.getElementById("disconnectBtn").addEventListener("click", () => {
   userDisconnected = true;
   if (bleDevice && bleDevice.gatt.connected) {
     bleDevice.gatt.disconnect();
+  }
+});
+
+// Force une nouvelle calibration de la ligne virtuelle GPS sur la voiture (3 tours).
+// Utile apres un changement de circuit ou une calibration ratee, sans devoir
+// reflasher ni redemarrer la voiture manuellement.
+document.getElementById("resetLineBtn").addEventListener("click", async () => {
+  const statusEl = document.getElementById("status");
+  if (!cmdCharacteristic) {
+    statusEl.textContent = "Pas de connexion au relais en ce moment - reessaie dans un instant.";
+    return;
+  }
+  if (!confirm("Réinitialiser la ligne virtuelle GPS ? La voiture devra refaire 3 tours pour recalibrer.")) return;
+  try {
+    await cmdCharacteristic.writeValue(new Uint8Array([0x03]));
+    statusEl.textContent = "Commande de réinitialisation envoyée à la voiture.";
+  } catch (err) {
+    statusEl.textContent = "Échec de l'envoi (relais hors ligne en ce moment) - reessaie.";
   }
 });
 
