@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>TRLG</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0f14">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f7fa">
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #131a22;
+    --border: #24303c;
+    --text: #e8eef4;
+    --muted: #8fa1b3;
+    --accent: #3ddc84;
+    --warn: #ff5c5c;
+    --btn-text: #06210f;
+  }
+  /* Suit automatiquement le theme clair/sombre du telephone (iOS et Android
+     supportent tous les deux prefers-color-scheme nativement). */
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f7fa;
+      --panel: #ffffff;
+      --border: #dbe1e8;
+      --text: #14181d;
+      --muted: #5b6b7a;
+      --accent: #1f8f57;
+      --warn: #d23c3c;
+      --btn-text: #ffffff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    max-width: 720px; /* garde un affichage compact sur tablette/grand ecran, plein largeur sur telephone */
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    padding: 16px;
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 4px 0; }
+  .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 16px; }
+  button {
+    background: var(--accent);
+    color: var(--btn-text);
+    border: none;
+    border-radius: 8px;
+    padding: 12px 20px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; }
+  button.secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  #status { margin: 12px 0; color: var(--muted); font-size: 0.9rem; }
+  .lapHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin: 16px 0 8px 0;
+  }
+  .lapHeader .lapNum { font-size: 1.6rem; font-weight: 700; }
+  .lapHeader .lapTime { font-size: 1.4rem; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .flags { color: var(--warn); font-size: 0.85rem; margin-bottom: 12px; min-height: 1.2em; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: right; padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
+  th:first-child, td:first-child { text-align: left; color: var(--muted); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }
+  tbody tr:hover { background: #182029; }
+  .history { display: flex; gap: 6px; overflow-x: auto; padding: 10px 0; }
+  .history button { padding: 8px 14px; font-size: 0.85rem; white-space: nowrap; }
+  .history button.active { outline: 2px solid var(--accent); }
+  #installBtn { position: fixed; bottom: 16px; right: 16px; display: none; }
+  #disconnectBtn { display: none; margin-left: 8px; }
+  .rssiPanel { margin: 16px 0; }
+  .rssiHeader { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .rssiHeader .sub { margin: 0; }
+  #rssiLatest { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .winSel button { padding: 5px 10px; font-size: 0.78rem; margin-left: 4px; }
+  .winSel button.active { outline: 2px solid var(--accent); }
+  #rssiChart { width: 100%; height: 140px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; display: block; }
+</style>
+</head>
+<body>
+  <h1>TRLG</h1>
+  <div class="sub">Résumé min / max / moyenne par tour — Link G4+ CAN Generic Dash</div>
+
+  <button id="connectBtn">Se connecter au relais (BLE)</button>
+  <button id="disconnectBtn" class="secondary">Déconnecter</button>
+  <div id="status">Non connecté.</div>
+
+  <div class="rssiPanel">
+    <div class="rssiHeader">
+      <span class="sub">Signal RSSI (live, pendant les rafales de fin de tour)</span>
+      <span id="rssiLatest">-</span>
+    </div>
+    <svg id="rssiChart" viewBox="0 0 600 160" preserveAspectRatio="none"></svg>
+    <div class="winSel" style="margin-top:6px; text-align:right;">
+      <button data-w="5" class="secondary">5s</button>
+      <button data-w="15" class="secondary active">15s</button>
+      <button data-w="60" class="secondary">60s</button>
+    </div>
+  </div>
+
+  <div id="content" style="display:none;">
+    <div class="history" id="history"></div>
+
+    <div class="lapHeader">
+      <div><span class="sub">Tour</span><br><span class="lapNum" id="lapNum">-</span></div>
+      <div style="text-align:right">
+        <span class="sub" id="timingSrc">Durée</span><br>
+        <span class="lapTime" id="lapTime">-</span>
+        <span id="lapDelta" style="font-size:0.95rem;margin-left:8px;"></span>
+      </div>
+    </div>
+    <div class="flags" id="flags"></div>
+
+    <table>
+      <thead>
+        <tr><th>Canal</th><th>Min</th><th>Max</th><th>Moy</th><th>Δ Moy</th><th>Unité</th></tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+
+  <button id="installBtn">Installer l'app</button>
+
+<script>
+// ---------- Table des canaux (miroir exact de la table cote emetteur ESPNOW_LapRelay_Car.ino) ----------
+const CHANNELS = [
+  { name: "Engine Speed",       unit: "RPM",  txScale: 1 },
+  { name: "MAP",                unit: "kPa",  txScale: 10 },
+  { name: "MGP",                unit: "kPa",  txScale: 10 },
+  { name: "Barometric Pressure",unit: "kPa",  txScale: 10 },
+  { name: "Throttle Position",  unit: "%",    txScale: 10 },
+  { name: "Injector Duty",      unit: "%",    txScale: 10 },
+  { name: "Sec. Injector Duty", unit: "%",    txScale: 10 },
+  { name: "Injector Pulse W.",  unit: "ms",   txScale: 100 },
+  { name: "Coolant Temp",       unit: "°C",   txScale: 10 },
+  { name: "Intake Air Temp",    unit: "°C",   txScale: 10 },
+  { name: "Battery Voltage",    unit: "V",    txScale: 100 },
+  { name: "Mass Air Flow",      unit: "g/s",  txScale: 10 },
+  { name: "Gear",               unit: "",     txScale: 1 },
+  { name: "Injector Timing",    unit: "°",    txScale: 1 },
+  { name: "Ignition Timing",    unit: "°",    txScale: 10 },
+  { name: "Inlet Cam L",        unit: "°",    txScale: 10 },
+  { name: "Inlet Cam R",        unit: "°",    txScale: 10 },
+  { name: "Exhaust Cam L",      unit: "°",    txScale: 10 },
+  { name: "Exhaust Cam R",      unit: "°",    txScale: 10 },
+  { name: "Lambda 1",           unit: "λ",    txScale: 1000 },
+  { name: "Lambda 2",           unit: "λ",    txScale: 1000 },
+  { name: "Trigger 1 Err",      unit: "",     txScale: 1 },
+  { name: "Fault Code Count",   unit: "",     txScale: 1 },
+  { name: "Fuel Pressure",      unit: "kPa",  txScale: 1 },
+  { name: "Oil Temp",           unit: "°C",   txScale: 10 },
+  { name: "Oil Pressure",       unit: "kPa",  txScale: 1 },
+  { name: "Wheel Speed LF",     unit: "km/h", txScale: 10 },
+  { name: "Wheel Speed LR",     unit: "km/h", txScale: 10 },
+  { name: "Wheel Speed RF",     unit: "km/h", txScale: 10 },
+  { name: "Wheel Speed RR",     unit: "km/h", txScale: 10 },
+  { name: "Knock Cyl 1",        unit: "",     txScale: 1 },
+  { name: "Knock Cyl 2",        unit: "",     txScale: 1 },
+  { name: "Knock Cyl 3",        unit: "",     txScale: 1 },
+  { name: "Knock Cyl 4",        unit: "",     txScale: 1 },
+  { name: "Knock Cyl 5",        unit: "",     txScale: 1 },
+  { name: "Knock Cyl 6",        unit: "",     txScale: 1 },
+  { name: "Knock Cyl 7",        unit: "",     txScale: 1 },
+  { name: "Knock Cyl 8",        unit: "",     txScale: 1 },
+];
+
+const LIMIT_FLAGS = [
+  "RPM Limit", "MAP Limit", "Speed Limit", "Maximum Ignition",
+  "Anti-Lag Ignition Cut", "High Voltage Supply Limit", "Overrun", "Traction Limit",
+  "Low Supply Voltage Limit", "Launch RPM Limit", "Wakeup", "GP RPM Limit 1",
+  "CL Stepper Limit", "GP RPM Limit 2", "E-Throttle Limit", "Cyclic Idle Active",
+];
+
+const SERVICE_UUID = "b3d5a900-1a2b-4c3d-9e0f-56789abcdef0";
+const CHARACTERISTIC_UUID = "b3d5a901-1a2b-4c3d-9e0f-56789abcdef0";
+
+// ---------- Reassemblage des paquets fragmentes (BLE_CHUNK_SIZE cote relais) ----------
+let chunks = [];
+let expectedTotal = 0;
+const laps = []; // historique en memoire {num, durationMs, values, flags}
+
+function onNotify(event) {
+  const data = new Uint8Array(event.target.value.buffer);
+  const index = data[0];
+  const total = data[1];
+  const payload = data.slice(2);
+
+  if (index === 0) {
+    chunks = [];
+    expectedTotal = total;
+  }
+  chunks[index] = payload;
+
+  if (chunks.filter(c => c).length === expectedTotal && expectedTotal > 0) {
+    const full = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0));
+    let offset = 0;
+    for (const c of chunks) { full.set(c, offset); offset += c.length; }
+    dispatchPacket(full);
+    chunks = [];
+    expectedTotal = 0;
+  }
+}
+
+function dispatchPacket(bytes) {
+  const msgType = bytes[0];
+  if (msgType === 0x01) decodeLapPacket(bytes);
+  else if (msgType === 0x02) handleRssiSample(bytes);
+}
+
+// ---------- RSSI live ----------
+const RSSI_MIN = -100, RSSI_MAX = -30;
+let rssiSamples = [];
+let rssiWindowSec = 15;
+
+function handleRssiSample(bytes) {
+  const rssi = new DataView(bytes.buffer).getInt8(1);
+  rssiSamples.push({ t: Date.now(), rssi });
+  const cutoff = Date.now() - 60000;
+  while (rssiSamples.length && rssiSamples[0].t < cutoff) rssiSamples.shift();
+}
+
+function drawRssiChart() {
+  const svg = document.getElementById("rssiChart");
+  const W = 600, H = 160;
+  const now = Date.now();
+  const windowMs = rssiWindowSec * 1000;
+  const visible = rssiSamples.filter(s => now - s.t <= windowMs);
+
+  // Auto-scale l'axe Y sur le min/max visible, avec 5dBm de marge de chaque cote
+  // pour garder un graphique lisible (sinon la plage fixe -100/-30 ecrase les
+  // petites variations quand le signal reste stable).
+  const RSSI_MARGIN = 5;
+  let yMin = RSSI_MIN, yMax = RSSI_MAX;
+  if (visible.length) {
+    const vals = visible.map(s => s.rssi);
+    yMin = Math.min(...vals) - RSSI_MARGIN;
+    yMax = Math.max(...vals) + RSSI_MARGIN;
+  }
+
+  const xFor = t => W - ((now - t) / windowMs) * W;
+  const yFor = r => {
+    const clamped = Math.max(yMin, Math.min(yMax, r));
+    return H - ((clamped - yMin) / (yMax - yMin)) * H;
+  };
+
+  let path = "";
+  let lastT = null;
+  visible.forEach(s => {
+    const x = xFor(s.t).toFixed(1), y = yFor(s.rssi).toFixed(1);
+    path += (lastT === null || s.t - lastT > 2000 ? "M" : "L") + x + "," + y + " ";
+    lastT = s.t;
+  });
+
+  const dots = visible.map(s =>
+    `<circle cx="${xFor(s.t).toFixed(1)}" cy="${yFor(s.rssi).toFixed(1)}" r="2" fill="var(--accent)"/>`
+  ).join("");
+
+  const gridYTop = yFor(yMax).toFixed(1), gridYBot = yFor(yMin).toFixed(1);
+
+  svg.innerHTML =
+    `<line x1="0" y1="${gridYTop}" x2="${W}" y2="${gridYTop}" stroke="var(--border)" stroke-dasharray="4,4"/>` +
+    `<text x="4" y="${Math.max(10, gridYTop - 4)}" fill="var(--muted)" font-size="10">${Math.round(yMax)}dBm</text>` +
+    `<line x1="0" y1="${gridYBot}" x2="${W}" y2="${gridYBot}" stroke="var(--border)" stroke-dasharray="4,4"/>` +
+    `<text x="4" y="${Math.min(H - 4, gridYBot - 4)}" fill="var(--muted)" font-size="10">${Math.round(yMin)}dBm</text>` +
+    `<path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>` +
+    dots;
+
+  const latest = rssiSamples.length ? rssiSamples[rssiSamples.length - 1] : null;
+  document.getElementById("rssiLatest").textContent = latest ? latest.rssi + " dBm" : "-";
+}
+
+setInterval(drawRssiChart, 250);
+
+document.querySelectorAll(".winSel button").forEach(b => {
+  b.addEventListener("click", () => {
+    rssiWindowSec = parseInt(b.dataset.w, 10);
+    document.querySelectorAll(".winSel button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    drawRssiChart();
+  });
+});
+
+function decodeLapPacket(bytes) {
+  const view = new DataView(bytes.buffer);
+  const lapNumber = view.getUint16(1, true);
+  const lapDurationMs = view.getUint32(3, true);
+  const timingSource = view.getUint8(7); // 0 = radio approx, 1 = GPS precis (ligne virtuelle)
+
+  const values = [];
+  let offset = 8;
+  for (let i = 0; i < CHANNELS.length; i++) {
+    const min = view.getInt16(offset, true); offset += 2;
+    const max = view.getInt16(offset, true); offset += 2;
+    const avg = view.getInt16(offset, true); offset += 2;
+    values.push({ min, max, avg });
+  }
+  const limitFlags = view.getUint16(offset, true);
+
+  const lap = { num: lapNumber, durationMs: lapDurationMs, timingSource, values, limitFlags };
+  laps.push(lap);
+  renderLap(lap);
+  renderHistory();
+}
+
+function fmtVal(raw, txScale) {
+  const v = raw / txScale;
+  return Number.isInteger(txScale) && txScale === 1 ? v.toString() : v.toFixed(txScale >= 100 ? 3 : 1);
+}
+
+function fmtDuration(ms) {
+  const s = ms / 1000;
+  return s.toFixed(2) + " s";
+}
+
+function findPreviousLap(lap) {
+  const idx = laps.indexOf(lap);
+  return idx > 0 ? laps[idx - 1] : null;
+}
+
+function renderLap(lap) {
+  document.getElementById("lapNum").textContent = "#" + lap.num;
+  document.getElementById("lapTime").textContent = fmtDuration(lap.durationMs);
+  document.getElementById("timingSrc").textContent =
+    lap.timingSource === 1 ? "Durée (GPS précis)" : "Durée (radio approx.)";
+
+  const prev = findPreviousLap(lap);
+  const deltaEl = document.getElementById("lapDelta");
+  if (prev) {
+    const deltaMs = lap.durationMs - prev.durationMs;
+    const sign = deltaMs >= 0 ? "+" : "";
+    deltaEl.textContent = `${sign}${(deltaMs / 1000).toFixed(2)}s vs #${prev.num}`;
+    deltaEl.style.color = deltaMs < 0 ? "var(--accent)" : (deltaMs > 0 ? "var(--warn)" : "var(--muted)");
+  } else {
+    deltaEl.textContent = "";
+  }
+
+  const activeFlags = LIMIT_FLAGS.filter((_, i) => (lap.limitFlags & (1 << i)) !== 0);
+  document.getElementById("flags").textContent = activeFlags.length
+    ? "⚠ " + activeFlags.join(" · ")
+    : "";
+
+  const tbody = document.getElementById("tbody");
+  tbody.innerHTML = "";
+  CHANNELS.forEach((ch, i) => {
+    const v = lap.values[i];
+    let deltaStr = "-";
+    if (prev) {
+      const d = (v.avg - prev.values[i].avg) / ch.txScale;
+      const sign = d >= 0 ? "+" : "";
+      deltaStr = sign + d.toFixed(ch.txScale >= 100 ? 3 : 1);
+    }
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${ch.name}</td>
+      <td>${fmtVal(v.min, ch.txScale)}</td>
+      <td>${fmtVal(v.max, ch.txScale)}</td>
+      <td>${fmtVal(v.avg, ch.txScale)}</td>
+      <td style="color:var(--muted)">${deltaStr}</td>
+      <td>${ch.unit}</td>`;
+    tbody.appendChild(tr);
+  });
+
+  document.getElementById("content").style.display = "block";
+}
+
+function renderHistory() {
+  const hist = document.getElementById("history");
+  hist.innerHTML = "";
+  laps.slice().reverse().forEach(lap => {
+    const b = document.createElement("button");
+    b.className = "secondary" + (lap === laps[laps.length - 1] ? " active" : "");
+    b.textContent = "#" + lap.num + " · " + fmtDuration(lap.durationMs);
+    b.onclick = () => {
+      renderLap(lap);
+      document.querySelectorAll(".history button").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+    };
+    hist.appendChild(b);
+  });
+}
+
+let bleDevice = null;
+let userDisconnected = false;
+let reconnecting = false;
+
+function setConnectedUI(connected) {
+  document.getElementById("connectBtn").style.display = connected ? "none" : "inline-block";
+  document.getElementById("disconnectBtn").style.display = connected ? "inline-block" : "none";
+}
+
+// Le relais coupe volontairement le BLE entre les tours (pour laisser l'ESP-NOW
+// respirer - un seul ESP32 ne peut pas faire du BLE continu + de la bonne
+// reception radio en meme temps) et le rallume juste apres chaque tour recu.
+// Le PWA doit donc se reconnecter tout seul a chaque reapparition du relais,
+// sans redemander la permission (deja accordee sur l'objet bleDevice retenu).
+async function attachToRelay(server) {
+  const statusEl = document.getElementById("status");
+  const service = await server.getPrimaryService(SERVICE_UUID);
+  const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+  await characteristic.startNotifications();
+  characteristic.addEventListener("characteristicvaluechanged", onNotify);
+  statusEl.textContent = "Connecté à " + (bleDevice.name || "TRLG-Relais") + ". En attente d'un tour...";
+  setConnectedUI(true);
+}
+
+async function attemptReconnect() {
+  if (reconnecting) return;
+  reconnecting = true;
+  const statusEl = document.getElementById("status");
+  statusEl.textContent = "Relais hors ligne (BLE coupé entre les tours) - reconnexion automatique...";
+  while (!userDisconnected) {
+    try {
+      const server = await bleDevice.gatt.connect();
+      await attachToRelay(server);
+      reconnecting = false;
+      return;
+    } catch (err) {
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  reconnecting = false;
+}
+
+document.getElementById("connectBtn").addEventListener("click", async () => {
+  const statusEl = document.getElementById("status");
+  try {
+    statusEl.textContent = "Recherche du relais...";
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }],
+    });
+    userDisconnected = false;
+    statusEl.textContent = "Connexion...";
+    bleDevice.addEventListener("gattserverdisconnected", () => {
+      setConnectedUI(false);
+      if (!userDisconnected) attemptReconnect();
+      else statusEl.textContent = "Déconnecté.";
+    });
+    const server = await bleDevice.gatt.connect();
+    await attachToRelay(server);
+  } catch (err) {
+    statusEl.textContent = "Erreur : " + err.message;
+  }
+});
+
+document.getElementById("disconnectBtn").addEventListener("click", () => {
+  userDisconnected = true;
+  if (bleDevice && bleDevice.gatt.connected) {
+    bleDevice.gatt.disconnect();
+  }
+});
+
+// ---------- Installation PWA ----------
+let deferredPrompt;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  document.getElementById("installBtn").style.display = "block";
+});
+document.getElementById("installBtn").addEventListener("click", async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  deferredPrompt = null;
+  document.getElementById("installBtn").style.display = "none";
+});
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>
