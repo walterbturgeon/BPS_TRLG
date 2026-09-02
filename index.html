@@ -126,6 +126,17 @@
         <span id="lapDelta" style="font-size:0.95rem;margin-left:8px;"></span>
       </div>
     </div>
+    <div id="speedBlock" style="display:none;margin:14px 0;">
+      <div class="sub" style="margin-bottom:6px;">Carte de vitesse du tour</div>
+      <canvas id="speedMap" height="300" style="display:block;width:100%;border-radius:8px;background:rgba(128,128,128,.08);"></canvas>
+      <div class="sub" id="speedLegend" style="margin-top:6px;"></div>
+      <div class="sub" style="margin-top:4px;opacity:.75;">
+        <span style="color:hsl(140,85%,45%)">■</span> le plus lent du tour
+        &nbsp;→&nbsp;
+        <span style="color:hsl(0,85%,50%)">■</span> le plus rapide
+      </div>
+    </div>
+
     <div class="flags" id="flags"></div>
     <div class="sub" id="gpsInfo" style="margin-bottom:12px;"></div>
 
@@ -224,6 +235,124 @@ function dispatchPacket(bytes) {
   const msgType = bytes[0];
   if (msgType === 0x01) decodeLapPacket(bytes);
   else if (msgType === 0x02) handleRssiSample(bytes);
+  else if (msgType === 0x04) decodeTracePacket(bytes);
+}
+
+// ---------- Trace du tour : la carte de vitesse ----------
+//
+// La voiture envoie 138 positions par tour, decoupees en 3 morceaux de 46.
+// Chaque point tient en 5 octets : ecart est/nord a l'origine du tour en
+// metres (deux int16) et vitesse en km/h (uint8). Les morceaux arrivent dans
+// n'importe quel ordre et peuvent manquer - on dessine ce qu'on a.
+const traces = new Map();   // numero de tour -> { parts, intervalMs, origine }
+let lapAffiche = null;      // tour actuellement a l'ecran
+
+function decodeTracePacket(bytes) {
+  const view = new DataView(bytes.buffer);
+  const lapNumber  = view.getUint16(1, true);
+  const partIndex  = view.getUint8(3);
+  const partCount  = view.getUint8(4);
+  const pointCount = view.getUint8(5);
+  const intervalMs = view.getUint16(6, true);
+  const originLat  = view.getInt32(8, true) / 1e7;
+  const originLon  = view.getInt32(12, true) / 1e7;
+
+  let t = traces.get(lapNumber);
+  if (!t) { t = { parts: [], partCount, intervalMs, originLat, originLon }; traces.set(lapNumber, t); }
+  t.partCount = partCount;
+  t.intervalMs = intervalMs;
+
+  const pts = [];
+  let offset = 16;
+  for (let i = 0; i < pointCount && offset + 5 <= bytes.length; i++) {
+    pts.push({
+      dx: view.getInt16(offset, true),
+      dy: view.getInt16(offset + 2, true),
+      kmh: view.getUint8(offset + 4)
+    });
+    offset += 5;
+  }
+  t.parts[partIndex] = pts;
+
+  // Les morceaux arrivent apres le resume : si c'est le tour a l'ecran, on
+  // redessine au fur et a mesure qu'ils tombent.
+  if (lapAffiche && lapAffiche.num === lapNumber) drawTrace(lapNumber);
+  renderHistory();
+}
+
+function traceComplete(t) {
+  if (!t) return [];
+  const out = [];
+  for (let i = 0; i < t.partCount; i++) if (t.parts[i]) out.push(...t.parts[i]);
+  return out;
+}
+
+// Vert au plus lent, rouge au plus vite : l'oeil trouve tout de suite les
+// portions ou la voiture perd du temps.
+function couleurVitesse(kmh, min, max) {
+  const u = max > min ? (kmh - min) / (max - min) : 0.5;
+  const teinte = 140 - 140 * Math.max(0, Math.min(1, u));   // 140 vert -> 0 rouge
+  return `hsl(${teinte}, 85%, 50%)`;
+}
+
+function drawTrace(lapNumber) {
+  const carte = document.getElementById('speedMap');
+  const legende = document.getElementById('speedLegend');
+  const bloc = document.getElementById('speedBlock');
+  if (!carte) return;
+
+  const t = traces.get(lapNumber);
+  const pts = traceComplete(t);
+  if (pts.length < 2) { bloc.style.display = 'none'; return; }
+  bloc.style.display = 'block';
+
+  const manquants = t.partCount - t.parts.filter(p => p).length;
+  const vits = pts.map(p => p.kmh);
+  const vmin = Math.min(...vits), vmax = Math.max(...vits);
+
+  const dpr = window.devicePixelRatio || 1;
+  const w = carte.clientWidth, h = 300;
+  carte.width = w * dpr; carte.height = h * dpr;
+  const g = carte.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const xs = pts.map(p => p.dx), ys = pts.map(p => p.dy);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = 24;
+  const s = Math.min((w - 2 * pad) / Math.max(maxX - minX, 1),
+                     (h - 2 * pad) / Math.max(maxY - minY, 1));
+  const ox = (w - (maxX - minX) * s) / 2, oy = (h - (maxY - minY) * s) / 2;
+  const X = x => ox + (x - minX) * s;
+  const Y = y => h - (oy + (y - minY) * s);
+
+  // Un segment par intervalle, colore par la vitesse moyenne de ses deux bouts.
+  g.lineWidth = 5; g.lineCap = 'round'; g.lineJoin = 'round';
+  for (let i = 1; i < pts.length; i++) {
+    g.strokeStyle = couleurVitesse((pts[i - 1].kmh + pts[i].kmh) / 2, vmin, vmax);
+    g.beginPath();
+    g.moveTo(X(pts[i - 1].dx), Y(pts[i - 1].dy));
+    g.lineTo(X(pts[i].dx), Y(pts[i].dy));
+    g.stroke();
+  }
+
+  // Depart du tour
+  g.fillStyle = '#fff'; g.strokeStyle = '#000'; g.lineWidth = 2;
+  g.beginPath(); g.arc(X(pts[0].dx), Y(pts[0].dy), 5, 0, Math.PI * 2);
+  g.fill(); g.stroke();
+
+  // Echelle
+  const cible = Math.pow(10, Math.round(Math.log10(80 / s)));
+  g.strokeStyle = 'rgba(128,128,128,.8)'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(12, h - 14); g.lineTo(12 + cible * s, h - 14); g.stroke();
+  g.fillStyle = 'rgba(128,128,128,.9)'; g.font = '11px monospace';
+  g.fillText(cible >= 1000 ? (cible / 1000) + ' km' : cible + ' m', 12, h - 20);
+
+  legende.innerHTML =
+    `<b>${pts.length}</b> points · <b>${vmin}</b> à <b>${vmax}</b> km/h · ` +
+    `un point toutes les <b>${(t.intervalMs / 1000).toFixed(1)} s</b>` +
+    (manquants > 0 ? ` · <span style="color:#e08">${manquants} morceau(x) non reçu(s)</span>` : '');
 }
 
 // ---------- RSSI live ----------
@@ -344,6 +473,8 @@ function findPreviousLap(lap) {
 }
 
 function renderLap(lap) {
+  lapAffiche = lap;
+  drawTrace(lap.num);
   document.getElementById("lapNum").textContent = "#" + lap.num;
   document.getElementById("lapTime").textContent = fmtDuration(lap.durationMs);
   document.getElementById("timingSrc").textContent =
@@ -403,13 +534,18 @@ function renderLap(lap) {
   document.getElementById("content").style.display = "block";
 }
 
+window.addEventListener('resize', () => { if (lapAffiche) drawTrace(lapAffiche.num); });
+
 function renderHistory() {
   const hist = document.getElementById("history");
   hist.innerHTML = "";
   laps.slice().reverse().forEach(lap => {
     const b = document.createElement("button");
     b.className = "secondary" + (lap === laps[laps.length - 1] ? " active" : "");
-    b.textContent = "#" + lap.num + " · " + fmtDuration(lap.durationMs);
+    const t = traces.get(lap.num);
+    const nPts = traceComplete(t).length;
+    b.textContent = "#" + lap.num + " · " + fmtDuration(lap.durationMs) + (nPts ? " 🗺" : "");
+    if (nPts) b.title = nPts + " points de trace";
     b.onclick = () => {
       renderLap(lap);
       document.querySelectorAll(".history button").forEach(x => x.classList.remove("active"));
