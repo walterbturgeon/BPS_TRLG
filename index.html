@@ -18,10 +18,16 @@
     --warn: #ff5c5c;
     --btn-text: #06210f;
   }
-  /* Suit automatiquement le theme clair/sombre du telephone (iOS et Android
-     supportent tous les deux prefers-color-scheme nativement). */
+  /* Trois etats, pas deux.
+     - AUTO : rien sur <html>, seul prefers-color-scheme decide. C'est l'etat
+       par defaut, celui de la grande majorite des telephones.
+     - CLAIR ou SOMBRE : data-theme sur <html>, et ce choix doit BATTRE le
+       reglage du telephone dans les DEUX sens.
+     D'ou la garde :not([data-theme="dark"]) sur la regle systeme. Sans elle,
+     un telephone en mode clair imposerait le clair meme apres un choix manuel
+     du sombre. */
   @media (prefers-color-scheme: light) {
-    :root {
+    :root:not([data-theme="dark"]) {
       --bg: #f5f7fa;
       --panel: #ffffff;
       --border: #dbe1e8;
@@ -32,6 +38,36 @@
       --btn-text: #ffffff;
     }
   }
+  :root[data-theme="light"] {
+    --bg: #f5f7fa;
+    --panel: #ffffff;
+    --border: #dbe1e8;
+    --text: #14181d;
+    --muted: #5b6b7a;
+    --accent: #1f8f57;
+    --warn: #d23c3c;
+    --btn-text: #ffffff;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0f14;
+    --panel: #131a22;
+    --border: #24303c;
+    --text: #e8eef4;
+    --muted: #8fa1b3;
+    --accent: #3ddc84;
+    --warn: #ff5c5c;
+    --btn-text: #06210f;
+  }
+
+  /* Barre d'outils : theme et simulateur, hors du chemin quand on roule. */
+  .outils { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .segment { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .segment button {
+    background: transparent; color: var(--text); border: 0; border-radius: 0;
+    padding: 8px 12px; font-size: 0.85rem; font-weight: 500;
+  }
+  .segment button.on { background: var(--accent); color: var(--btn-text); font-weight: 700; }
+  .segment button + button { border-left: 1px solid var(--border); }
   * { box-sizing: border-box; }
   body {
     margin: 0 auto;
@@ -96,6 +132,17 @@
 <body>
   <h1>TRLG</h1>
   <div class="sub">Résumé min / max / moyenne par tour — Link G4+ CAN Generic Dash</div>
+
+  <div class="outils">
+    <span class="sub" style="margin:0;">Thème</span>
+    <div class="segment" id="themeSeg">
+      <button data-theme-choix="auto">Auto</button>
+      <button data-theme-choix="light">Clair</button>
+      <button data-theme-choix="dark">Sombre</button>
+    </div>
+    <button class="secondary" id="simBtn" style="padding:8px 12px;font-size:0.85rem;">Simuler un tour</button>
+    <button class="secondary" id="simClearBtn" style="padding:8px 12px;font-size:0.85rem;">Effacer</button>
+  </div>
 
   <button id="connectBtn">Se connecter au relais (BLE)</button>
   <button id="disconnectBtn" class="secondary">Déconnecter</button>
@@ -203,6 +250,168 @@ const LIMIT_FLAGS = [
 const SERVICE_UUID = "b3d5a900-1a2b-4c3d-9e0f-56789abcdef0";
 const CHARACTERISTIC_UUID = "b3d5a901-1a2b-4c3d-9e0f-56789abcdef0";
 const CMD_CHARACTERISTIC_UUID = "b3d5a902-1a2b-4c3d-9e0f-56789abcdef0";
+
+// ---------- Simulateur de tour ----------
+//
+// A quoi il sert : essayer l'affichage sans voiture, sans relais et sans
+// Bluetooth. Il fabrique les MEMES octets que le firmware, puis les passe par
+// dispatchPacket - le meme chemin que les vrais paquets. Un simulateur qui
+// remplirait directement les structures ne prouverait rien du decodage.
+//
+// Les tours simules sont marques : ils entrent dans l'historique comme les
+// autres, mais on doit pouvoir les distinguer d'un vrai run.
+let simTour = 900;   // numerotation a part, loin des vrais tours
+
+function simOctetsResume(lap, dureeMs, src, rpmMax, distMax) {
+  const b = new ArrayBuffer(248), v = new DataView(b);
+  v.setUint8(0, 0x01);
+  v.setUint16(1, lap, true);
+  v.setUint32(3, dureeMs, true);
+  v.setUint8(7, src);
+  // Quelques canaux plausibles ; les autres restent a zero, comme sur un bus
+  // ou tous les canaux ne sont pas cables.
+  const vals = {
+    0:[850, rpmMax, Math.round(rpmMax*0.57)], 1:[28,240,131], 3:[1013,1013,1013],
+    4:[0,1000,412], 8:[880,1010,948], 9:[290,340,312], 10:[132,142,138],
+    12:[1,5,3], 19:[780,1020,905], 23:[380,420,401], 24:[850,1120,995],
+    25:[310,480,402], 26:[0,1780,1120], 27:[0,1790,1124],
+    28:[0,1785,1122], 29:[0,1788,1125]
+  };
+  let o = 8;
+  for (let i = 0; i < 38; i++) {
+    const t = vals[i] || [0,0,0];
+    v.setInt16(o, t[0], true); v.setInt16(o+2, t[1], true); v.setInt16(o+4, t[2], true);
+    o += 6;
+  }
+  v.setUint16(o, 0, true); o += 2;
+  v.setInt32(o, Math.round(45.4067702*1e7), true); o += 4;
+  v.setInt32(o, Math.round(-72.7509981*1e7), true); o += 4;
+  v.setUint16(o, distMax, true);
+  return new Uint8Array(b);
+}
+
+function simOctetsTrace(lap, idx, count, pts, intervalMs) {
+  const b = new ArrayBuffer(16 + 46*5), v = new DataView(b);
+  v.setUint8(0, 0x04);
+  v.setUint16(1, lap, true);
+  v.setUint8(3, idx); v.setUint8(4, count); v.setUint8(5, pts.length);
+  v.setUint16(6, intervalMs, true);
+  v.setInt32(8, Math.round(45.4067702*1e7), true);
+  v.setInt32(12, Math.round(-72.7509981*1e7), true);
+  let o = 16;
+  for (const q of pts) {
+    v.setInt16(o, q.dx, true); v.setInt16(o+2, q.dy, true); v.setUint8(o+4, q.kmh);
+    o += 5;
+  }
+  return new Uint8Array(b);
+}
+
+// Un parcours ferme avec deux epingles : la vitesse chute dans les courbes et
+// remonte dans les droites, ce qui donne une carte lisible plutot qu'un
+// dégradé uniforme.
+function simParcours(n, graine) {
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = 2*Math.PI*i/n;
+    const r = 250 + 95*Math.cos(2*a + graine*0.4);
+    const courbure = Math.abs(Math.cos(2*a + graine*0.4));
+    const kmh = 58 + 98*(1 - courbure) + 6*Math.sin(5*a + graine);
+    pts.push({
+      dx: Math.round(r*Math.cos(a)),
+      dy: Math.round(0.63*r*Math.sin(a)),
+      kmh: Math.max(25, Math.min(255, Math.round(kmh)))
+    });
+  }
+  return pts;
+}
+
+function simulerUnTour() {
+  const n = laps.length;
+  // Les trois premiers tours en radio, puis GPS precis : c'est la sequence
+  // reelle - la ligne virtuelle a besoin de trois passages pour se caler.
+  const src = n < 3 ? 2 : 1;
+  const duree = Math.round(50000 + 4000*Math.sin(n*1.7) + Math.random()*1500);
+  const rpmMax = 6800 + Math.round(Math.random()*600);
+  const distMax = 150 + Math.round(Math.random()*20);
+
+  // ⚠ Le numero est fige AVANT les envois differes. Les morceaux de trace
+  // partent par setTimeout, donc apres l'increment : lire simTour dans le
+  // callback les envoyait sur un tour qui n'existe pas encore, et la carte de
+  // vitesse ne s'affichait jamais.
+  const numero = simTour;
+  simTour++;
+
+  document.getElementById('content').style.display = 'block';
+  dispatchPacket(simOctetsResume(numero, duree, src, rpmMax, distMax));
+
+  // La trace suit le resume, en trois morceaux, comme sur la vraie liaison.
+  const pts = simParcours(138, n);
+  const interval = Math.round(duree / 138);
+  [0,1,2].forEach((idx, k) => setTimeout(
+    () => dispatchPacket(simOctetsTrace(numero, idx, 3, pts.slice(idx*46, idx*46+46), interval)),
+    250 * (k + 1)));
+  const st = document.getElementById('status');
+  const relie = (typeof bleConnected !== "undefined") && bleConnected;
+  if (!relie) st.textContent = "Mode simulation — " + laps.length + " tour(s) fabriqué(s), aucun matériel branché.";
+}
+
+function effacerSimulation() {
+  laps.length = 0;
+  traces.clear();
+  lapAffiche = null;
+  simTour = 900;
+  document.getElementById('content').style.display = 'none';
+  document.getElementById('speedBlock').style.display = 'none';
+  renderHistory();
+  const relie = (typeof bleConnected !== "undefined") && bleConnected;
+  if (!relie) document.getElementById('status').textContent = "Non connecté.";
+}
+
+// ---------- Theme : auto, clair ou sombre ----------
+//
+// "auto" ne pose RIEN sur <html> : c'est prefers-color-scheme qui decide, et
+// la page suit le telephone si celui-ci change en cours de route. Un choix
+// explicite pose data-theme, qui bat le reglage du telephone dans les deux sens.
+//
+// La couleur de la barre systeme (theme-color) suit le choix, sinon le haut de
+// l'ecran resterait de la couleur de l'autre theme.
+const THEME_CLE = "trlg-theme";
+const THEME_BARRE = { light: "#f5f7fa", dark: "#0b0f14" };
+
+function appliquerTheme(choix) {
+  const html = document.documentElement;
+  if (choix === "auto") html.removeAttribute("data-theme");
+  else html.setAttribute("data-theme", choix);
+
+  const sombre = choix === "dark" ||
+    (choix === "auto" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.remove());
+  const m = document.createElement("meta");
+  m.name = "theme-color";
+  m.content = sombre ? THEME_BARRE.dark : THEME_BARRE.light;
+  document.head.appendChild(m);
+
+  document.querySelectorAll("#themeSeg button").forEach(b =>
+    b.classList.toggle("on", b.dataset.themeChoix === choix));
+
+  try { localStorage.setItem(THEME_CLE, choix); } catch (e) { /* navigation privee */ }
+  if (typeof lapAffiche !== "undefined" && lapAffiche) drawTrace(lapAffiche.num);
+  if (typeof drawRssiChart === "function") drawRssiChart();
+}
+
+function initTheme() {
+  let choix = "auto";
+  try { choix = localStorage.getItem(THEME_CLE) || "auto"; } catch (e) { /* ignore */ }
+  appliquerTheme(choix);
+  document.querySelectorAll("#themeSeg button").forEach(b =>
+    b.addEventListener("click", () => appliquerTheme(b.dataset.themeChoix)));
+  // En mode auto, on suit le telephone s'il bascule pendant qu'on regarde.
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    let c = "auto";
+    try { c = localStorage.getItem(THEME_CLE) || "auto"; } catch (e) { /* ignore */ }
+    if (c === "auto") appliquerTheme("auto");
+  });
+}
 
 // ---------- Reassemblage des paquets fragmentes (BLE_CHUNK_SIZE cote relais) ----------
 let chunks = [];
@@ -659,6 +868,11 @@ document.getElementById("installBtn").addEventListener("click", async () => {
   deferredPrompt = null;
   document.getElementById("installBtn").style.display = "none";
 });
+
+document.getElementById("simBtn").addEventListener("click", simulerUnTour);
+document.getElementById("simClearBtn").addEventListener("click", effacerSimulation);
+
+initTheme();
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("sw.js").catch(() => {});

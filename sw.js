@@ -3,7 +3,7 @@
 // C'est le seul declencheur de purge : l'evenement "activate" ne supprime que
 // les caches dont le nom DIFFERE de celui-ci. Tant que le nom reste le meme,
 // l'ancienne page survit sur le telephone, quoi qu'on pousse sur GitHub.
-const CACHE_NAME = "trlg-v2-carte-vitesse";
+const CACHE_NAME = "trlg-v3-theme-simulateur";
 const ASSETS = ["./index.html", "./manifest.json"];
 
 self.addEventListener("install", (event) => {
